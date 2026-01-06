@@ -150,7 +150,14 @@ def test_match_rule(matcher):
     data = {"content": "spam message"}
     trigger = Condition(field="content", operator="contains", value="spam")
     rule = ReviewRule(
-        id=1, name="test", enabled=True, priority=10, trigger=trigger, actions=[Action(type="delete", params={})]
+        id=1,
+        fid=1,
+        target_type="all",
+        name="test",
+        enabled=True,
+        priority=10,
+        trigger=trigger,
+        actions=[Action(type="delete", params={})],
     )
 
     assert matcher.match(data, rule) is True

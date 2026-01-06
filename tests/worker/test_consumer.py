@@ -44,6 +44,8 @@ async def test_process_message_success(mock_redis, mock_repo, mock_dispatcher, m
     # Setup rule match
     rule = ReviewRule(
         id=1,
+        fid=1,
+        target_type="all",
         name="test",
         enabled=True,
         priority=10,

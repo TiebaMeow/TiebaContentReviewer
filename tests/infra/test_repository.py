@@ -13,6 +13,8 @@ def mock_db_rules():
     # Create mock DB objects
     rule1 = MagicMock()
     rule1.id = 1
+    rule1.fid = 100
+    rule1.target_type = "all"
     rule1.name = "rule1"
     rule1.enabled = True
     rule1.priority = 10
@@ -45,7 +47,14 @@ async def test_handle_update_delete(mock_redis):
     repo = RuleRepository(mock_redis)
     # Manually add a rule
     rule = ReviewRule(
-        id=1, name="test", enabled=True, priority=10, trigger=Condition(field="a", operator="eq", value=1), actions=[]
+        id=1,
+        fid=1,
+        target_type="all",
+        name="test",
+        enabled=True,
+        priority=10,
+        trigger=Condition(field="a", operator="eq", value=1),
+        actions=[],
     )
     repo._rules = [rule]
 

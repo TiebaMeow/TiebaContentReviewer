@@ -184,6 +184,8 @@ class RuleRepository:
             try:
                 rule = ReviewRule(
                     id=r.id,
+                    fid=r.fid,
+                    target_type=r.target_type,
                     name=r.name,
                     enabled=r.enabled,
                     priority=r.priority,
@@ -218,6 +220,8 @@ class RuleRepository:
             try:
                 rule = ReviewRule(
                     id=r.id,
+                    fid=r.fid,
+                    target_type=r.target_type,
                     name=r.name,
                     enabled=r.enabled,
                     priority=r.priority,

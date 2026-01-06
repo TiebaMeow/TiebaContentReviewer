@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from sqlalchemy import Boolean, DateTime, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Enum, Integer, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -29,6 +29,7 @@ class RuleDBModel(Base):
 
     Attributes:
         id: 主键 ID。
+        fid: 贴吧 fid。
         name: 规则名称。
         enabled: 是否启用。
         priority: 优先级。
@@ -41,6 +42,10 @@ class RuleDBModel(Base):
     __tablename__ = "review_rules"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fid: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    target_type: Mapped[Literal["all", "thread", "post", "comment"]] = mapped_column(
+        Enum("all", "thread", "post", "comment", name="target_type_enum"), index=True, default="all", nullable=False
+    )
     name: Mapped[str] = mapped_column(String, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -52,7 +57,6 @@ class RuleDBModel(Base):
     )
 
 
-# Database Setup
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 

@@ -60,6 +60,8 @@ class ReviewRule(BaseModel):
 
     Attributes:
         id: 规则唯一标识 ID。
+        fid: 贴吧 fid。
+        target_type: 规则适用的目标类型，如 'all', 'thread', 'post', 'comment'。
         name: 规则名称。
         enabled: 是否启用该规则。
         priority: 规则优先级，数字越大越先执行。
@@ -68,6 +70,8 @@ class ReviewRule(BaseModel):
     """
 
     id: int
+    fid: int
+    target_type: Literal["all", "thread", "post", "comment"] = "all"
     name: str
     enabled: bool
     priority: int

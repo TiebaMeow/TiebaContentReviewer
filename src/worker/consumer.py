@@ -31,11 +31,15 @@ class ReviewWorker:
         dispatcher: ReviewResultDispatcher,
         matcher: RuleMatcher,
         redis_client: Redis,
+        stream_key: str | None = None,
+        fid: int | None = None,
     ) -> None:
         self._repo = repository
         self._dispatcher = dispatcher
         self._matcher = matcher
         self._redis = redis_client
+        self._stream_key = stream_key or settings.REDIS_STREAM_KEY
+        self._fid = fid
         self._running = False
         self._recovery_task: asyncio.Task[None] | None = None
 
@@ -49,15 +53,15 @@ class ReviewWorker:
 
         if settings.ENABLE_STREAM_RECOVERY:
             self._recovery_task = asyncio.create_task(self._recovery_loop())
-            logger.info("Stream recovery task started.")
+            logger.info("Stream recovery task started for {}.", self._stream_key)
 
-        logger.info("Worker started. Listening on {}", settings.REDIS_STREAM_KEY)
+        logger.info("Worker started. Listening on {}", self._stream_key)
 
         while self._running:
             try:
                 # XREADGROUP
                 # count=BATCH_SIZE, block=2000ms
-                streams = {settings.REDIS_STREAM_KEY: ">"}
+                streams = {self._stream_key: ">"}
                 messages = await self._redis.xreadgroup(
                     settings.REDIS_CONSUMER_GROUP,
                     settings.REDIS_CONSUMER_NAME,
@@ -69,9 +73,13 @@ class ReviewWorker:
                 if not messages:
                     continue
 
+                tasks = []
                 for _stream_name, entries in messages:
                     for message_id, fields in entries:
-                        await self._process_message(message_id, fields)
+                        tasks.append(self._process_message(message_id, fields))
+
+                if tasks:
+                    await asyncio.gather(*tasks)
 
             except Exception as e:
                 logger.error("Error in worker loop: {}", e)
@@ -93,7 +101,7 @@ class ReviewWorker:
         """
         try:
             await self._redis.xgroup_create(
-                settings.REDIS_STREAM_KEY,
+                self._stream_key,
                 settings.REDIS_CONSUMER_GROUP,
                 id="0",
                 mkstream=True,
@@ -181,7 +189,7 @@ class ReviewWorker:
         Args:
             message_id: 消息 ID。
         """
-        await self._redis.xack(settings.REDIS_STREAM_KEY, settings.REDIS_CONSUMER_GROUP, message_id)
+        await self._redis.xack(self._stream_key, settings.REDIS_CONSUMER_GROUP, message_id)
 
     async def _recovery_loop(self) -> None:
         """消息恢复循环。
@@ -196,7 +204,7 @@ class ReviewWorker:
                 # 尝试认领闲置超过 STREAM_MIN_IDLE_TIME 的消息
                 # start_id="0-0", count=BATCH_SIZE
                 messages = await self._redis.xautoclaim(
-                    settings.REDIS_STREAM_KEY,
+                    self._stream_key,
                     settings.REDIS_CONSUMER_GROUP,
                     settings.REDIS_CONSUMER_NAME,
                     min_idle_time=settings.STREAM_MIN_IDLE_TIME,

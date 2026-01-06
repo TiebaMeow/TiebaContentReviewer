@@ -6,12 +6,13 @@ import sys
 
 from tiebameow.utils.logger import init_logger, logger
 
+from src.config import settings
 from src.core.engine import RuleMatcher
 from src.infra.db import init_db
 from src.infra.dispatcher import ReviewResultDispatcher
 from src.infra.redis_client import get_redis_client
 from src.infra.repository import RuleRepository
-from src.worker.consumer import ReviewWorker
+from src.worker.manager import WorkerManager
 
 
 async def main() -> None:
@@ -47,8 +48,9 @@ async def main() -> None:
         logger.critical("Failed to load rules: {}", e)
         sys.exit(1)
 
-    # 4. 初始化 Worker
-    worker = ReviewWorker(repo, dispatcher, matcher, redis_client)
+    # 4. 初始化 Worker Manager
+    stream_key = settings.REDIS_STREAM_KEY
+    manager = WorkerManager(repo, dispatcher, matcher, redis_client, stream_key)
 
     # 5. 信号处理
     loop = asyncio.get_running_loop()
@@ -56,14 +58,14 @@ async def main() -> None:
 
     def signal_handler() -> None:
         logger.info("Shutdown signal received.")
-        worker.stop()
+        asyncio.create_task(manager.stop())
         stop_event.set()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
-    # 6. 运行 Worker
-    worker_task = asyncio.create_task(worker.run())
+    # 6. 运行 Manager
+    await manager.start()
 
     # 等待停止信号
     await stop_event.wait()
@@ -71,14 +73,7 @@ async def main() -> None:
     # 优雅关闭
     logger.info("Stopping services...")
     await repo.stop_sync()
-
-    # 等待 worker 结束
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        logger.error(f"Worker error during shutdown: {e}")
+    await manager.stop()
 
     logger.info("Exiting...")
 
