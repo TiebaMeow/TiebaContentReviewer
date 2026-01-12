@@ -8,7 +8,7 @@ from tiebameow.utils.logger import init_logger, logger
 
 from src.config import settings
 from src.core.engine import RuleMatcher
-from src.infra.db import init_db
+from src.infra.db import dispose_db, init_db
 from src.infra.dispatcher import ReviewResultDispatcher
 from src.infra.redis_client import get_redis_client
 from src.infra.repository import RuleRepository
@@ -74,6 +74,8 @@ async def main() -> None:
     logger.info("Stopping services...")
     await repo.stop_sync()
     await manager.stop()
+    await dispose_db()
+    await redis_client.close()
 
     logger.info("Exiting...")
 

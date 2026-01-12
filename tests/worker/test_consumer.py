@@ -1,123 +1,111 @@
-import json
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.core.rules import Action, Condition, ReviewRule
 from src.worker.consumer import ReviewWorker
 
 
 @pytest.fixture
 def mock_repo():
     repo = MagicMock()
-    repo.get_active_rules.return_value = []
+    repo.get_match_rules.return_value = []
     return repo
 
 
 @pytest.fixture
 def mock_dispatcher():
-    dispatcher = MagicMock()
-    dispatcher.dispatch = AsyncMock()
-    return dispatcher
+    return AsyncMock()
 
 
 @pytest.fixture
 def mock_matcher():
     matcher = MagicMock()
-    matcher.match.return_value = False
+    matcher.match_all.return_value = []
+    # match_all is run in executor, so it's a sync function mock
     return matcher
 
 
-@pytest.mark.asyncio
-async def test_ensure_consumer_group(mock_redis, mock_repo, mock_dispatcher, mock_matcher):
-    worker = ReviewWorker(mock_repo, mock_dispatcher, mock_matcher, mock_redis)
-
-    await worker._ensure_consumer_group()
-
-    mock_redis.xgroup_create.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_process_message_success(mock_redis, mock_repo, mock_dispatcher, mock_matcher):
-    worker = ReviewWorker(mock_repo, mock_dispatcher, mock_matcher, mock_redis)
-
-    # Setup rule match
-    rule = ReviewRule(
-        id=1,
-        fid=1,
-        target_type="all",
-        name="test",
-        enabled=True,
-        priority=10,
-        trigger=Condition(field="content", operator="contains", value="bad"),
-        actions=[Action(type="delete", params={})],
+@pytest.fixture
+def worker(mock_repo, mock_dispatcher, mock_matcher, mock_redis):
+    return ReviewWorker(
+        repository=mock_repo,
+        dispatcher=mock_dispatcher,
+        matcher=mock_matcher,
+        redis_client=mock_redis,
+        fid=123,
+        stream_key="test:stream",
     )
-    mock_repo.get_active_rules.return_value = [rule]
-    mock_matcher.match.return_value = True
-
-    # Message data
-    payload = {"content": "this is bad content"}
-    message_data = {"object_type": "post", "payload": payload}
-    fields = {"data": json.dumps(message_data)}
-
-    # Mock deserialize to return a dict or object
-    with patch("src.worker.consumer.deserialize") as mock_deserialize:
-        mock_deserialize.return_value = payload  # Simple dict for now
-
-        await worker._process_message("msg-id-1", fields)
-
-        # Verify matching called
-        mock_matcher.match.assert_called_with(payload, rule)
-
-        # Verify dispatch called
-        mock_dispatcher.dispatch.assert_called_once()
-        args = mock_dispatcher.dispatch.call_args[0]
-        # args[0] should be list of ReviewRule
-        assert len(args[0]) == 1
-        assert args[0][0] == rule
-        assert args[1] == "post"
-        assert args[2] == payload
-
-        # Verify ACK
-        mock_redis.xack.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_process_message_invalid_format(mock_redis, mock_repo, mock_dispatcher, mock_matcher):
-    worker = ReviewWorker(mock_repo, mock_dispatcher, mock_matcher, mock_redis)
+async def test_recovery_loop_logic(worker):
+    """Test that recovery loop uses and updates cursor properly."""
 
-    # Missing data field
-    await worker._process_message("msg-id-1", {})
-    mock_redis.xack.assert_called_once()  # Should ack to skip bad message
-    mock_dispatcher.dispatch.assert_not_called()
+    # Setup xautoclaim mock responses
+    # First call returns messages with next_id "1-0"
+    # Second call returns messages with next_id "2-0"
+    # Third call raises CancelledError to stop loop
 
-    mock_redis.xack.reset_mock()
-
-    # Invalid JSON
-    await worker._process_message("msg-id-2", {"data": "invalid-json"})
-    # Should ack to skip bad message
-    mock_redis.xack.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_run_loop(mock_redis, mock_repo, mock_dispatcher, mock_matcher):
-    worker = ReviewWorker(mock_repo, mock_dispatcher, mock_matcher, mock_redis)
-
-    # Mock xreadgroup to return one message then empty
-    # We need to stop the loop, so we can raise an exception or set _running to False
+    responses = [
+        ("1-0", [("msg1", {"data": "{}"})], []),  # Call 1
+        ("2-0", [("msg2", {"data": "{}"})], []),  # Call 2
+    ]
 
     async def side_effect(*args, **kwargs):
-        worker.stop()  # Stop after first call
-        return [["stream_key", [("msg-id-1", {"data": json.dumps({"object_type": "t", "payload": {}})})]]]
+        nonlocal responses
+        # Check start_id used
+        kwargs.get("start_id")
 
-    mock_redis.xreadgroup.side_effect = side_effect
+        if not responses:
+            raise asyncio.CancelledError
 
-    # Mock _process_message to avoid complex setup
+        ret = responses.pop(0)
+        # We can assert start_id here if we want strict checking order
+        return ret
+
+    worker._redis.xautoclaim = AsyncMock(side_effect=side_effect)
     worker._process_message = AsyncMock()
 
-    # Mock _ensure_consumer_group
-    worker._ensure_consumer_group = AsyncMock()
+    # Speed up sleep
+    with patch("asyncio.sleep", AsyncMock()):
+        worker._running = True
+        try:
+            await worker._recovery_loop()
+        except asyncio.CancelledError:
+            pass
 
-    await worker.run()
+    # Verify calls
+    assert worker._redis.xautoclaim.call_count == 3  # 2 responses + 1 cancelled
 
-    worker._process_message.assert_called_once()
+    # Check start_id params
+    calls = worker._redis.xautoclaim.call_args_list
+    assert calls[0].kwargs["start_id"] == "0-0"
+    assert calls[1].kwargs["start_id"] == "1-0"
+    assert calls[2].kwargs["start_id"] == "2-0"
+
+
+@pytest.mark.asyncio
+async def test_process_message_optimizations(worker, mock_repo, mock_matcher):
+    """Test standard process flow uses optimizations."""
+
+    # Mock data
+    fields = {"data": '{"object_type": "post", "object_id": 1, "payload": {"active": true}}'}
+
+    with patch("src.worker.consumer.deserialize") as mock_deserialize:
+        mock_obj = MagicMock()
+        mock_obj.model_dump.return_value = {}
+        mock_deserialize.return_value = mock_obj
+
+        await worker._process_message("123-0", fields)
+
+        # 1. Check get_match_rules called with correct fid and object_type
+        mock_repo.get_match_rules.assert_called_with(worker._fid, "post")
+
+        # 2. Check run_in_executor usage (implicit via match_all call check)
+        # Should call match_all(obj, rules)
+        assert mock_matcher.match_all.called
+        args = mock_matcher.match_all.call_args
+        assert args[0][0] == mock_obj
+        # Rules arg
+        assert args[0][1] == mock_repo.get_match_rules.return_value

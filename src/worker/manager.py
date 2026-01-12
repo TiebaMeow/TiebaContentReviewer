@@ -80,9 +80,7 @@ class WorkerManager:
         rules = self._repo.get_active_rules()
 
         # 提取所有需要监听的 fid
-        # 假设 RuleDBModel 中的 fid 字段对应规则适用的贴吧
-        # 如果有全局规则 (fid=0 或特定标识)，可能需要特殊处理
-        active_fids = {rule.fid for rule in rules if hasattr(rule, "fid")}
+        active_fids = {rule.fid for rule in rules}
 
         # 1. 停止不再需要的 Worker
         current_fids = set(self._active_workers.keys())
@@ -108,8 +106,8 @@ class WorkerManager:
                 self._dispatcher,
                 self._matcher,
                 self._redis,
-                stream_key=stream_key,
                 fid=fid,
+                stream_key=stream_key,
             )
             task = asyncio.create_task(worker.run())
             self._active_workers[fid] = (worker, task)

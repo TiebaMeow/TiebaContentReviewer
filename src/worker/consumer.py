@@ -31,14 +31,14 @@ class ReviewWorker:
         dispatcher: ReviewResultDispatcher,
         matcher: RuleMatcher,
         redis_client: Redis,
-        stream_key: str | None = None,
-        fid: int | None = None,
+        fid: int,
+        stream_key: str,
     ) -> None:
         self._repo = repository
         self._dispatcher = dispatcher
         self._matcher = matcher
         self._redis = redis_client
-        self._stream_key = stream_key or settings.REDIS_STREAM_KEY
+        self._stream_key = stream_key
         self._fid = fid
         self._running = False
         self._recovery_task: asyncio.Task[None] | None = None
@@ -131,48 +131,46 @@ class ReviewWorker:
 
             data = json.loads(raw_data)
             object_type = data.get("object_type")
+            object_id = data.get("object_id")
             payload = data.get("payload")
 
             if not object_type or not payload:
-                logger.warning("Invalid message format: {}", message_id)
+                logger.warning("Invalid message format: {}", object_id)
                 await self._ack(message_id)
                 return
 
-            assert isinstance(payload, dict)
-            assert object_type in ("thread", "post", "comment")
+            if not isinstance(payload, dict) or object_type not in ("thread", "post", "comment"):
+                logger.warning("Invalid message format: {}", object_id)
+                await self._ack(message_id)
+                return
 
             # 反序列化
             try:
                 obj = deserialize(object_type, payload)
             except Exception as e:
-                logger.error("Deserialization failed for {}: {}", message_id, e)
+                logger.error("Deserialization failed for {}: {}", object_id, e)
                 await self._ack(message_id)
                 return
 
-            # 转换为字典供规则引擎使用
-            # 假设 obj 是 Pydantic model
-            if hasattr(obj, "model_dump"):
-                obj_dict = obj.model_dump()
-            else:
-                obj_dict = payload  # Fallback
+            # 获取当前规则 (按 FID 和 ObjectType 过滤)
+            rules = self._repo.get_match_rules(self._fid, object_type)
 
-            # 获取当前规则
-            rules = self._repo.get_active_rules()
-
-            matched_rules = []
             try:
-                for rule in rules:
-                    if self._matcher.match(obj_dict, rule):
+                # 性能优化: 将 CPU 密集的规则匹配放入线程池执行
+                loop = asyncio.get_running_loop()
+                matched_rules = await loop.run_in_executor(None, self._matcher.match_all, obj, rules)
+                if matched_rules:
+                    for rule in matched_rules:
                         logger.info("Rule matched: {} (ID: {})", rule.name, rule.id)
-                        matched_rules.append(rule)
             except Exception as e:
                 logger.error("Error matching rules for message {}: {}", message_id, e)
                 await self._ack(message_id)
                 return
 
             # 分发结果
+            obj_dict = obj.model_dump()
             if matched_rules:
-                await self._dispatcher.dispatch(matched_rules, object_type, obj_dict)
+                await self._dispatcher.dispatch(matched_rules, self._fid, object_type, obj_dict)
 
             # ACK
             await self._ack(message_id)
@@ -196,26 +194,29 @@ class ReviewWorker:
 
         定期扫描并认领长时间未处理的消息 (PEL)，防止消息丢失。
         """
+        last_id = "0-0"
         while self._running:
             try:
                 await asyncio.sleep(settings.STREAM_RECOVERY_INTERVAL)
 
                 # XAUTOCLAIM
                 # 尝试认领闲置超过 STREAM_MIN_IDLE_TIME 的消息
-                # start_id="0-0", count=BATCH_SIZE
                 messages = await self._redis.xautoclaim(
                     self._stream_key,
                     settings.REDIS_CONSUMER_GROUP,
                     settings.REDIS_CONSUMER_NAME,
                     min_idle_time=settings.STREAM_MIN_IDLE_TIME,
-                    start_id="0-0",
+                    start_id=last_id,
                     count=settings.BATCH_SIZE,
                 )
 
                 # messages 结构: (next_start_id, entries, [deleted_ids])
                 # entries 是列表 [(message_id, fields), ...]
-                if messages and len(messages) > 1:
+                if messages:
+                    # 更新游标
+                    last_id = messages[0]
                     entries = messages[1]
+
                     if entries:
                         logger.info("Recovered {} messages.", len(entries))
                         for message_id, fields in entries:
@@ -225,4 +226,6 @@ class ReviewWorker:
                 break
             except Exception as e:
                 logger.error("Error in recovery loop: {}", e)
+                # 出错时重置 last_id 以防卡死
+                last_id = "0-0"
                 await asyncio.sleep(60)

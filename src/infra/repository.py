@@ -2,22 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import TypeAdapter
 from sqlalchemy import func, select
+from tiebameow.models.orm import ReviewRules
+from tiebameow.schemas.rules import TargetType
 from tiebameow.utils.logger import logger
 from tiebameow.utils.time_utils import now_with_tz
 
 from src.config import settings
-from src.core.rules import Action, ReviewRule, RuleNode
-from src.infra.db import AsyncSessionLocal, RuleDBModel
+from src.infra.db import get_session
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
+    from tiebameow.schemas.rules import ReviewRule
 
 
 class RuleRepository:
@@ -34,6 +35,7 @@ class RuleRepository:
             redis_client: Redis 客户端实例，用于订阅规则变更通知。
         """
         self._rules: list[ReviewRule] = []
+        self._rule_index: dict[tuple[int, TargetType], list[ReviewRule]] = {}
         self._redis = redis_client
         self._sync_task: asyncio.Task[None] | None = None
         self._periodic_sync_task: asyncio.Task[None] | None = None
@@ -45,8 +47,8 @@ class RuleRepository:
         在服务启动时调用，确保内存中有初始规则数据。
         """
         logger.info("Loading rules from PostgreSQL...")
-        async with AsyncSessionLocal() as db:
-            await self._refresh_all_rules(db)
+        async with get_session() as session:
+            await self._refresh_all_rules(session)
         logger.info("Loaded {} rules.", len(self._rules))
 
     def start_sync(self) -> None:
@@ -88,6 +90,25 @@ class RuleRepository:
         """
         return list(self._rules)
 
+    def get_match_rules(self, fid: int, target_type: Literal["thread", "post", "comment"]) -> list[ReviewRule]:
+        """获取指定 fid 和目标类型的有效规则。
+
+        Args:
+            fid: 贴吧 ID。
+            target_type: 目标类型 ('thread', 'post', 'comment')。
+
+        Returns:
+            list[ReviewRule]: 规则列表。
+        """
+
+        global_rules = self._rule_index.get((fid, TargetType.ALL), [])
+        specific_rules = self._rule_index.get((fid, TargetType(target_type)), [])
+
+        rules = specific_rules + global_rules
+        rules.sort(key=lambda x: x.priority)
+
+        return rules
+
     async def _redis_listener(self) -> None:
         """Redis 订阅监听器的后台任务。
 
@@ -120,9 +141,9 @@ class RuleRepository:
         while True:
             try:
                 await asyncio.sleep(settings.RULE_SYNC_INTERVAL)
-                async with AsyncSessionLocal() as db:
+                async with get_session() as session:
                     # 检查最大 updated_at
-                    result = await db.execute(select(func.max(RuleDBModel.updated_at)))
+                    result = await session.execute(select(func.max(ReviewRules.updated_at)))
                     max_updated_at = result.scalar()
 
                     if max_updated_at and (self._last_synced_at is None or max_updated_at > self._last_synced_at):
@@ -131,7 +152,7 @@ class RuleRepository:
                             self._last_synced_at,
                             max_updated_at,
                         )
-                        await self._refresh_all_rules(db)
+                        await self._refresh_all_rules(session)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -157,79 +178,72 @@ class RuleRepository:
             if event_type == "DELETE":
                 self._rules = [r for r in self._rules if r.id != rule_id]
             elif event_type in ("UPDATE", "ADD"):
-                async with AsyncSessionLocal() as db:
-                    await self._refresh_single_rule(db, rule_id)
+                async with get_session() as session:
+                    await self._refresh_single_rule(session, rule_id)
 
         except Exception as e:
             logger.error("Error handling rule update: {}", e)
 
-    async def _refresh_all_rules(self, db: AsyncSession) -> None:
+    async def _refresh_all_rules(self, session: AsyncSession) -> None:
         """从数据库重新加载所有启用的规则并更新内存缓存。
 
         Args:
-            db: 数据库会话。
+            session: 数据库会话。
         """
 
         # 更新最后同步时间
         # 注意：这里取的是当前时间，也可以取 max_updated_at，但为了简单起见取当前时间
         # 如果使用 max_updated_at，需要确保所有节点时间同步
         self._last_synced_at = now_with_tz()
-        result = await db.execute(
-            select(RuleDBModel).where(RuleDBModel.enabled == True)  # noqa: E712
+        result = await session.execute(
+            select(ReviewRules).where(ReviewRules.enabled == True)  # noqa: E712
         )
         db_rules = result.scalars().all()
 
         new_rules = []
         for r in db_rules:
             try:
-                rule = ReviewRule(
-                    id=r.id,
-                    fid=r.fid,
-                    target_type=r.target_type,
-                    name=r.name,
-                    enabled=r.enabled,
-                    priority=r.priority,
-                    trigger=TypeAdapter(RuleNode).validate_python(r.trigger),
-                    actions=TypeAdapter(list[Action]).validate_python(r.actions),
-                )
+                rule = r.to_rule_data()
                 new_rules.append(rule)
             except Exception as e:
                 logger.error("Failed to parse rule {}: {}", r.id, e)
 
-        # 按优先级降序排序
-        new_rules.sort(key=lambda x: x.priority, reverse=True)
         self._rules = new_rules
+        self._rebuild_index()
 
-    async def _refresh_single_rule(self, db: AsyncSession, rule_id: int) -> None:
+    async def _refresh_single_rule(self, session: AsyncSession, rule_id: int) -> None:
         """刷新单个规则的缓存。
 
         如果规则被禁用或删除，则从内存中移除。
 
         Args:
-            db: 数据库会话。
+            session: 数据库会话。
             rule_id: 规则 ID。
         """
         # 先移除旧的
         self._rules = [r for r in self._rules if r.id != rule_id]
 
         # 查询新的
-        result = await db.execute(select(RuleDBModel).where(RuleDBModel.id == rule_id))
+        result = await session.execute(select(ReviewRules).where(ReviewRules.id == rule_id))
         r = result.scalar_one_or_none()
 
         if r and r.enabled:
             try:
-                rule = ReviewRule(
-                    id=r.id,
-                    fid=r.fid,
-                    target_type=r.target_type,
-                    name=r.name,
-                    enabled=r.enabled,
-                    priority=r.priority,
-                    trigger=TypeAdapter(RuleNode).validate_python(r.trigger),
-                    actions=TypeAdapter(list[Action]).validate_python(r.actions),
-                )
+                rule = r.to_rule_data()
                 self._rules.append(rule)
-                # 重新排序
-                self._rules.sort(key=lambda x: x.priority, reverse=True)
             except Exception as e:
                 logger.error("Failed to parse rule {}: {}", r.id, e)
+
+        self._rebuild_index()
+
+    def _rebuild_index(self) -> None:
+        """重建索引。"""
+        index: dict[tuple[int, TargetType], list[ReviewRule]] = {}
+        for rule in self._rules:
+            key = (rule.fid, rule.target_type)
+            if key not in index:
+                index[key] = []
+            index[key].append(rule)
+        self._rule_index = index
+        for key in self._rule_index:
+            self._rule_index[key].sort(key=lambda x: x.priority)

@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from datetime import datetime  # noqa: TC003
-from typing import TYPE_CHECKING, Any, Literal
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, Enum, Integer, String, func
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from tiebameow.models.orm import RuleBase
 
 from src.config import settings
 
@@ -18,57 +17,27 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 
-class Base(DeclarativeBase):
-    pass
+_engine: AsyncEngine | None = None
+_sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
-class RuleDBModel(Base):
-    """审查规则的数据库模型。
-
-    对应数据库中的 review_rules 表。
-
-    Attributes:
-        id: 主键 ID。
-        fid: 贴吧 fid。
-        name: 规则名称。
-        enabled: 是否启用。
-        priority: 优先级。
-        trigger: 触发条件 JSON。
-        actions: 动作列表 JSON。
-        created_at: 创建时间。
-        updated_at: 更新时间。
-    """
-
-    __tablename__ = "review_rules"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    fid: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
-    target_type: Mapped[Literal["all", "thread", "post", "comment"]] = mapped_column(
-        Enum("all", "thread", "post", "comment", name="target_type_enum"), index=True, default="all", nullable=False
-    )
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    trigger: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
-    )
-
-
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-AsyncSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
+@asynccontextmanager
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """获取数据库会话的异步生成器。
 
     Yields:
         AsyncSession: SQLAlchemy 异步会话对象。
     """
-    async with AsyncSessionLocal() as db:
-        yield db
+    if _sessionmaker is None:
+        raise RuntimeError("Database is not initialized. Call init_db first.")
+    async with _sessionmaker() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
 
 
 async def init_db() -> None:
@@ -76,5 +45,20 @@ async def init_db() -> None:
 
     创建所有定义的表结构。
     """
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    global _engine, _sessionmaker
+
+    if _engine is None:
+        _engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+    if _sessionmaker is None:
+        _sessionmaker = async_sessionmaker(bind=_engine, class_=AsyncSession, expire_on_commit=False)
+    async with _engine.begin() as conn:
+        await conn.run_sync(RuleBase.metadata.create_all)
+
+
+async def dispose_db() -> None:
+    """释放数据库连接。"""
+    global _engine, _sessionmaker
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None
+    _sessionmaker = None

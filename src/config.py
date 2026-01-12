@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from urllib.parse import quote_plus
+
+from pydantic import PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +20,7 @@ class Settings(BaseSettings):
         REDIS_HOST: Redis 主机地址。
         REDIS_PORT: Redis 端口。
         REDIS_DB: Redis 数据库索引。
+        REDIS_USER: Redis 用户名。
         REDIS_PASSWORD: Redis 密码。
         REDIS_STREAM_KEY: 输入数据流的 Key。
         REDIS_CONSUMER_GROUP: 消费者组名称。
@@ -42,6 +46,7 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
+    REDIS_USER: str | None = None
     REDIS_PASSWORD: str | None = None
 
     # Redis Stream (Input)
@@ -72,13 +77,29 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         """获取 SQLAlchemy 格式的数据库连接 URL。"""
-        return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        return str(
+            PostgresDsn(
+                f"postgresql+asyncpg://{quote_plus(self.DB_USER)}:{quote_plus(self.DB_PASSWORD)}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+            )
+        )
 
     @property
     def redis_url(self) -> str:
         """获取 Redis 连接 URL。"""
-        auth = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        return f"redis://{auth}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        if self.REDIS_USER and self.REDIS_PASSWORD:
+            return str(
+                RedisDsn(
+                    f"redis://{quote_plus(self.REDIS_USER)}:{quote_plus(self.REDIS_PASSWORD)}"
+                    f"@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+                )
+            )
+        if self.REDIS_PASSWORD:
+            return str(
+                RedisDsn(
+                    f"redis://:{quote_plus(self.REDIS_PASSWORD)}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+                )
+            )
+        return str(RedisDsn(f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"))
 
 
 settings = Settings()

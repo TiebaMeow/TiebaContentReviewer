@@ -7,29 +7,17 @@ from pydantic import BaseModel, Field
 from tiebameow.utils.logger import logger
 
 from src.config import settings
-from src.core.rules import Action  # noqa: TC001
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
-
-    from src.core.rules import ReviewRule
-
-
-class MatchedRule(BaseModel):
-    """命中的规则信息。"""
-
-    id: int
-    name: str
-    priority: int
-    actions: list[Action]
+    from tiebameow.schemas.rules import ReviewRule
 
 
 class ReviewResultPayload(BaseModel):
-    """审查结果载荷。"""
-
-    matched_rules: list[MatchedRule]
+    fid: int
+    matched_rule_ids: list[int]
     object_type: str
-    target_data: dict[str, Any]
+    object_data: dict[str, Any]
     timestamp: float = Field(default_factory=time.time)
 
 
@@ -45,8 +33,9 @@ class ReviewResultDispatcher:
     async def dispatch(
         self,
         rules: list[ReviewRule],
+        fid: int,
         object_type: str,
-        target_data: dict[str, Any],
+        object_data: dict[str, Any],
     ) -> None:
         """分发审查结果到 Redis Stream。
 
@@ -61,25 +50,18 @@ class ReviewResultDispatcher:
             return
 
         try:
-            matched_rules = [
-                MatchedRule(
-                    id=rule.id,
-                    name=rule.name,
-                    priority=rule.priority,
-                    actions=rule.actions,
-                )
-                for rule in rules
-            ]
+            matched_rule_ids = [rule.id for rule in rules]
 
             payload = ReviewResultPayload(
-                matched_rules=matched_rules,
+                fid=fid,
+                matched_rule_ids=matched_rule_ids,
                 object_type=object_type,
-                target_data=target_data,
+                object_data=object_data,
             )
 
             stream_entry = {"data": payload.model_dump_json()}
 
             await self._redis.xadd(settings.REDIS_ACTION_STREAM_KEY, stream_entry)  # type: ignore[arg-type]
-            logger.info("Dispatched result with {} matched rules to stream.", len(matched_rules))
+            logger.info("Dispatched result with {} matched rules to stream.", len(matched_rule_ids))
         except Exception as e:
             logger.error("Failed to dispatch result: {}", e)
