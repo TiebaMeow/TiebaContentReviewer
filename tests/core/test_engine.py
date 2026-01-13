@@ -1,11 +1,5 @@
 import pytest
-from tiebameow.schemas.rules import (
-    Condition,
-    FieldType,
-    OperatorType,
-    ReviewRule,
-    TargetType,
-)
+from tiebameow.schemas.rules import Actions, Condition, FieldType, OperatorType, ReviewRule, TargetType
 
 from src.core.engine import RuleMatcher
 
@@ -43,10 +37,11 @@ def test_match_all(matcher):
         name="Rule 1",
         enabled=True,
         trigger=Condition(field=FieldType.TITLE, operator=OperatorType.EQ, value="foo"),
-        actions=[],
+        actions=Actions(),
         priority=10,
         fid=1,
         forum_rule_id=101,
+        uploader_id=0,
         target_type=TargetType.THREAD,
     )
     rule2 = ReviewRule(
@@ -54,10 +49,11 @@ def test_match_all(matcher):
         name="Rule 2",
         enabled=True,
         trigger=Condition(field=FieldType.TITLE, operator=OperatorType.EQ, value="bar"),
-        actions=[],
+        actions=Actions(),
         priority=10,
         fid=1,
         forum_rule_id=102,
+        uploader_id=0,
         target_type=TargetType.THREAD,
     )
 
