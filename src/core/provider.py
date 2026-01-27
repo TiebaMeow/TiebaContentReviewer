@@ -69,7 +69,11 @@ class RpcFunctionProvider(FunctionProvider):
 
     async def execute(self, name: str, data: ReviewData, args: list[Any], kwargs: dict[str, Any]) -> Any:
         # 序列化数据
-        data_json = data.model_dump_json()
+        object_type = type(data).__name__.replace("DTO", "").lower()
+        data_json = orjson.dumps({
+            "object_type": object_type,
+            "payload": data.model_dump(mode="json"),
+        }).decode("utf-8")
 
         request = review_service_pb2.ExecuteRequest(  # type: ignore
             function_name=name,
