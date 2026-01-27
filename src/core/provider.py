@@ -4,7 +4,7 @@ import abc
 import inspect
 from typing import TYPE_CHECKING, Any
 
-import grpc
+import grpc  # type: ignore[import-untyped]
 import orjson
 from tiebameow.utils.logger import logger
 
