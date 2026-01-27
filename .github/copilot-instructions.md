@@ -1,54 +1,58 @@
 # Copilot Instructions for TiebaContentReviewer
 
-This repository implements a high-performance content review service for Tieba, integrated with the [TiebaMeow](https://github.com/TiebaMeow/) ecosystem. It processes data from Redis Streams, evaluates it against dynamic rules, and dispatches results to downstream actions.
+This repository implements a scalable, rule-based content review service for Tieba, part of the `TiebaMeow` ecosystem. It evaluates content (Threads/Posts/Comments) against dynamic rules using local or remote logic.
 
-## Architecture & Data Flow
+## Architecture & Core Components
 
-The system uses a **Worker-Engine-Dispatcher** pattern:
-1.  **Ingestion (Worker)**: `ReviewWorker` (`src/worker/consumer.py`) consumes raw data chunks (Thread/Post/Comment) from a Redis Stream Consumer Group. It supports crash recovery via `_recovery_loop`.
-2.  **Evaluation (Engine)**: `RuleMatcher` (`src/core/engine.py`) determines if data matches active `ReviewRule`s. It supports nested boolean logic (AND/OR/NOT/XOR) and deep field inspection.
-3.  **Dispatch (Infrastructure)**: `ReviewResultDispatcher` (`src/infra/dispatcher.py`) serializes matches into `ReviewResultPayload` and pushes them to an **output Redis Stream** (not a list).
+-   **Service Entry (`main.py`)**: Bootstraps the application, initializing DB, Redis, and the `WorkerManager`.
+-   **Worker Management (`src/worker/manager.py`)**: Orchestrates multiple `ReviewWorker` instances dynamically based on active rules (keyed by `fid`).
+-   **Event Processing (`src/worker/consumer.py`)**: Each `ReviewWorker` consumes from a Redis Stream Group, processing messages in batches with error recovery.
+-   **Rule Engine (`src/core/engine.py`)**: Matches content against `ReviewRule` trees.
+-   **Function Providers (`src/core/provider.py`)**: abstracted execution logic for rule conditions:
+    -   `LocalFunctionProvider`: Executes Python functions registered in `src/core/registry.py`.
+    -   `RpcFunctionProvider`: Calls a gRPC service (`src/rpc/review_service.proto`) for external logic.
+    -   `HybridFunctionProvider`: Prefers local functions, falls back to RPC.
 
-**Key Redis Keys (Configurable)**:
--   Input: `settings.REDIS_STREAM_KEY` (Default: `scraper:tieba:events`)
--   Output: `settings.REDIS_ACTION_STREAM_KEY`
--   Signaling: `settings.REDIS_RULES_CHANNEL` (Pub/Sub for hot-reloading rules)
+## Data Flow
+
+1.  **Ingestion**: `ReviewWorker` pulls content events from `settings.REDIS_STREAM_KEY` (e.g., `scraper:tieba:events`).
+2.  **Evaluation**:
+    -   Content is converted to DTOs (`ThreadDTO`, `PostDTO`, `CommentDTO` from `tiebameow`).
+    -   `RuleMatcher` evaluates active rules for the content's `fid`.
+    -   Custom logic (`text_length`, `keyword_count`) is executed via the active `FunctionProvider`.
+3.  **Result Dispatch**: Matches are serialized to `ReviewResultPayload` and pushed to `settings.REDIS_ACTION_STREAM_KEY`.
 
 ## Developer Workflow
 
-This project uses **uv** for all dependency and environment management.
+This project uses **uv** for dependency management.
 
--   **Install**: `uv sync`
--   **Test**: `uv run pytest` (Strict `pytest-asyncio` mode enabled)
+### Build & Run
+-   **Install Dependencies**: `uv sync`
+-   **Compile Protobuf**: Required if `src/rpc/review_service.proto` changes.
+    ```bash
+    uv run python -m grpc_tools.protoc -I=src/rpc --python_out=src/rpc --grpc_python_out=src/rpc src/rpc/review_service.proto
+    ```
+-   **Run locally**: `uv run python main.py`
+
+### Testing & Quality
+-   **Test**: `uv run pytest` (Strict `pytest-asyncio` mode).
 -   **Lint/Format**: `uv run ruff check .` / `uv run ruff format .`
--   **Type Check**: `uv run mypy src main.py` (Strict mode enables `disallow_untyped_defs = true`, etc.)
+-   **Type Check**: `uv run mypy .` (Strict mode is active).
 
 ## Coding Conventions
 
--   **Python 3.12+**: Use modern features. Avoid `typing.Optional/List/Dict`; use `|` unions and built-in generics (e.g., `list[str]`).
--   **Strict Typing**:
-    -   Always import `from __future__ import annotations` at the top of files.
-    -   Use `typing.TYPE_CHECKING` blocks to prevent circular imports.
-    -   Every function **MUST** have type hints for arguments and return values.
--   **Asynchronous I/O**:
-    -   All DB (PostgreSQL) and Redis interactions must be async (`await`).
-    -   Use `asyncio.gather` for concurrency where appropriate.
--   **Logging**:
-    -   **NEVER** use `print` or standard `logging`.
-    -   **ALWAYS** use `tiebameow.utils.logger` (Loguru-style: `logger.info("Message {}", arg)`).
--   **Configuration**:
-    -   Import settings via `from src.config import settings`.
-    -   Do not hardcode Redis keys or DB credentials.
+-   **Typing**:
+    -   Use `from __future__ import annotations`.
+    -   Strict typing is enforced. Use `typing.TYPE_CHECKING` to avoid circular imports.
+    -   Avoid `Optional`/`List`; use `| None` and `list[]`.
+-   **Async I/O**: All I/O (Redis/DB/gRPC) must be `await`ed.
+-   **External Models**: Use DTOs and Schemas (`ReviewRule`, `Condition`) from the `tiebameow` library, NOT defined locally.
+-   **Logging**: Use `tiebameow.utils.logger` exclusively.
+-   **Function Registry**: To add new local rule functions, decorate them with `@rule_functions.register()` in `src/functions.py`.
 
-## Critical Files
+## Key Files
 
--   `src/worker/consumer.py`: Main event loop (`xreadgroup`). Handles batching and stream recovery.
--   `src/core/engine.py`: Implements the `RuleMatcher` logic.
--   `src/infra/dispatcher.py`: Constructs `ReviewResultPayload` and executes `xadd`.
--   `src/core/rules.py`: `ReviewRule`, `RuleGroup`, `Condition` definitions (sourced from `tiebameow` schemas).
-
-## Specific Patterns
-
--   **Rule Logic**: Rules are effectively syntax trees. `_evaluate_node` recursively checks `RuleGroup` logic.
--   **Message Ack**: Redis Stream messages must be acknowledged (`xack`) after successful processing (handled in `ReviewWorker._process_message`).
--   **Dependency Injection**: The worker receives its dependencies (`repository`, `dispatcher`, `matcher`, `redis_client`) in `__init__`, facilitating testing.
+-   `src/rpc/review_service.proto`: gRPC definition for remote review logic.
+-   `src/core/registry.py`: Registry for local rule functions.
+-   `src/core/provider.py`: Strategy for executing rule functions (Local vs RPC).
+-   `src/functions.py`: Implementation of common local review functions.
