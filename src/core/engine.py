@@ -4,7 +4,9 @@ import functools
 import re
 from typing import TYPE_CHECKING, Any
 
-from tiebameow.schemas.rules import Condition, LogicType, OperatorType, ReviewRule, RuleGroup, RuleNode
+from tiebameow.schemas.rules import Condition, FunctionCall, LogicType, OperatorType, ReviewRule, RuleGroup, RuleNode
+
+from src.core.provider import FunctionProvider, LocalFunctionProvider
 
 if TYPE_CHECKING:
     from tiebameow.models.dto import CommentDTO, PostDTO, ThreadDTO
@@ -17,15 +19,18 @@ class RuleMatcher:
     和嵌套字段访问。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, provider: FunctionProvider | None = None) -> None:
         self._regex_cache: dict[str, re.Pattern[str]] = {}
+        self._provider = provider or LocalFunctionProvider()
 
-    def match_all(
+    async def match_all(
         self,
         data: ThreadDTO | PostDTO | CommentDTO,
         rules: list[ReviewRule],
     ) -> list[ReviewRule]:
         """批量匹配规则。
+
+        按顺序执行规则。
 
         Args:
             data: 待审查的数据。
@@ -34,9 +39,16 @@ class RuleMatcher:
         Returns:
             list[ReviewRule]: 命中的规则列表。
         """
-        return [rule for rule in rules if self.match(data, rule)]
+        matched: list[ReviewRule] = []
 
-    def match(self, data: ThreadDTO | PostDTO | CommentDTO, rule: ReviewRule) -> bool:
+        for rule in rules:
+            if await self.match(data, rule):
+                matched.append(rule)
+                if rule.block:
+                    break
+        return matched
+
+    async def match(self, data: ThreadDTO | PostDTO | CommentDTO, rule: ReviewRule) -> bool:
         """判断数据是否命中规则。
 
         Args:
@@ -48,9 +60,9 @@ class RuleMatcher:
         """
         if not rule.enabled:
             return False
-        return self._evaluate_node(data, rule.trigger)
+        return await self._evaluate_node(data, rule.trigger)
 
-    def _evaluate_node(self, data: ThreadDTO | PostDTO | CommentDTO, node: RuleNode) -> bool:
+    async def _evaluate_node(self, data: ThreadDTO | PostDTO | CommentDTO, node: RuleNode) -> bool:
         """递归评估规则节点。
 
         Args:
@@ -65,21 +77,31 @@ class RuleMatcher:
                 return False
 
             if node.logic == LogicType.AND:
-                return all(self._evaluate_node(data, child) for child in node.conditions)
+                for child in node.conditions:
+                    if not await self._evaluate_node(data, child):
+                        return False
+                return True
             elif node.logic == LogicType.OR:
-                return any(self._evaluate_node(data, child) for child in node.conditions)
+                for child in node.conditions:
+                    if await self._evaluate_node(data, child):
+                        return True
+                return False
             elif node.logic == LogicType.NOT:
                 # NOT 逻辑只应用于第一个子条件
-                return not self._evaluate_node(data, node.conditions[0])
+                return not await self._evaluate_node(data, node.conditions[0])
 
             return False  # type: ignore[unreachable]
 
         else:
-            return self._evaluate_condition(data, node)
+            return await self._evaluate_condition(data, node)
 
-    def _evaluate_condition(self, data: ThreadDTO | PostDTO | CommentDTO, condition: Condition) -> bool:
+    async def _evaluate_condition(self, data: ThreadDTO | PostDTO | CommentDTO, condition: Condition) -> bool:
         # 支持嵌套字段访问，例如 'author.level'
-        field_value = self._get_field_value(data, condition.field)
+        # 或者 FunctionCall 计算字段值
+        if isinstance(condition.field, FunctionCall):
+            field_value = await self._execute_function_call(data, condition.field)
+        else:
+            field_value = self._get_field_value(data, condition.field)
 
         if field_value is None:
             return False
@@ -150,6 +172,10 @@ class RuleMatcher:
                     return False
             case _:
                 return False  # type: ignore[unreachable]
+
+    async def _execute_function_call(self, data: ThreadDTO | PostDTO | CommentDTO, func_call: FunctionCall) -> Any:
+        """执行 FunctionCall 获取值。"""
+        return await self._provider.execute(func_call.name, data, func_call.args, func_call.kwargs)
 
     def _get_compiled_regex(self, pattern: str) -> re.Pattern[str]:
         """获取编译后的正则表达式对象（带缓存）。"""

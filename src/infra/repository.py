@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Literal
 
+import orjson
 from sqlalchemy import func, select
 from tiebameow.models.orm import ReviewRules
 from tiebameow.schemas.rules import TargetType
@@ -166,10 +166,7 @@ class RuleRepository:
             raw_data: Redis 消息中的原始数据（JSON 字符串或字节）。
         """
         try:
-            if isinstance(raw_data, bytes):
-                raw_data = raw_data.decode("utf-8")
-
-            event = json.loads(raw_data)
+            event = orjson.loads(raw_data)
             rule_id = event.get("rule_id")
             event_type = event.get("type")
 

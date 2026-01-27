@@ -1,5 +1,7 @@
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import orjson
 import pytest
 from tiebameow.schemas.rules import ReviewRule, TargetType
 
@@ -75,3 +77,171 @@ def test_rule_indexing(repo):
     # Expected: Empty (No THREAD rule, No ALL rule for 200)
     rules_200_thread = repo.get_match_rules(200, "thread")
     assert len(rules_200_thread) == 0
+
+
+@pytest.mark.asyncio
+async def test_load_initial_rules(repo):
+    # Mock DB session and result
+    mock_rule = MagicMock()
+    # Mock return values for to_rule_data
+    mock_rule.to_rule_data.return_value = MagicMock(id=1, fid=100, target_type=TargetType.THREAD, priority=10)
+
+    # Mock the SQLAlchemy result
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [mock_rule]
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+
+    # Mock get_session context manager
+    mock_get_session_cm = AsyncMock()
+    mock_get_session_cm.__aenter__.return_value = mock_session
+    mock_get_session_cm.__aexit__.return_value = None
+
+    with patch("src.infra.repository.get_session", return_value=mock_get_session_cm):
+        await repo.load_initial_rules()
+
+    assert len(repo._rules) == 1
+    assert repo._rules[0].id == 1
+    assert (100, TargetType.THREAD) in repo._rule_index
+
+
+@pytest.mark.asyncio
+async def test_handle_update_delete(repo):
+    # Setup initial rule
+    rule = MagicMock(spec=ReviewRule)
+    # Be careful with MagicMock attributes being overwritten
+    rule.id = 1
+    rule.fid = 100
+    rule.target_type = TargetType.THREAD
+    rule.priority = 10
+
+    repo._rules = [rule]
+    repo._rebuild_index()
+    assert len(repo._rules) == 1
+
+    raw_data = orjson.dumps({"type": "DELETE", "rule_id": 1})
+
+    await repo._handle_update(raw_data)
+
+    assert len(repo._rules) == 0
+
+
+@pytest.mark.asyncio
+async def test_redis_listener(repo):
+    # Mock redis pubsub
+    # repo._redis is MagicMock
+    # pubsub() returns something.
+    mock_pubsub = MagicMock()
+    repo._redis.pubsub.return_value = mock_pubsub
+
+    # Simulate a message and then a cancellation
+    messages = [
+        {"type": "message", "data": orjson.dumps({"type": "UPDATE", "rule_id": 1})},
+    ]
+
+    async def msg_gen():
+        for m in messages:
+            yield m
+        # Break loop by raising cancellation
+        raise asyncio.CancelledError
+
+    # Mock listen to return the async generator
+    # listen() call returns an async iterator
+    mock_pubsub.listen.side_effect = msg_gen
+
+    # Mock subscribe/unsubscribe
+    mock_pubsub.subscribe = AsyncMock()
+    mock_pubsub.unsubscribe = AsyncMock()
+    mock_pubsub.close = AsyncMock()
+
+    # Mock handle_update
+    repo._handle_update = AsyncMock()
+
+    try:
+        await repo._redis_listener()
+    except asyncio.CancelledError:
+        pass
+
+    repo._handle_update.assert_called_once()
+    mock_pubsub.unsubscribe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_periodic_sync(repo):
+    # Mock sleep to stop loop after one iteration (first sleep for interval, second raises CancelledError to exit)
+    with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+        # Mock DB
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalar.return_value = 1234567890  # max_updated_at set to timestamp
+        mock_session.execute.return_value = mock_result
+
+        mock_get_session_cm = AsyncMock()
+        mock_get_session_cm.__aenter__.return_value = mock_session
+        mock_get_session_cm.__aexit__.return_value = None
+
+        repo._last_synced_at = 1000  # older
+        repo._refresh_all_rules = AsyncMock()
+
+        with patch("src.infra.repository.get_session", return_value=mock_get_session_cm):
+            try:
+                await repo._periodic_sync_loop()
+            except asyncio.CancelledError:
+                pass
+
+        repo._refresh_all_rules.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_handle_update_add(repo):
+    repo._rules = []
+
+    mock_db_rule = MagicMock()
+    # Mock database rule object
+    mock_db_rule.enabled = True
+
+    # Mock the converted rule data
+    converted_rule = MagicMock(spec=ReviewRule)
+    converted_rule.id = 2
+    converted_rule.fid = 200
+    converted_rule.target_type = TargetType.POST
+
+    mock_db_rule.to_rule_data.return_value = converted_rule
+
+    mock_result = MagicMock()
+    mock_result.scalar_one_or_none.return_value = mock_db_rule
+
+    mock_session = AsyncMock()
+    mock_session.execute.return_value = mock_result
+
+    mock_get_session_cm = AsyncMock()
+    mock_get_session_cm.__aenter__.return_value = mock_session
+    mock_get_session_cm.__aexit__.return_value = None
+
+    raw_data = orjson.dumps({"type": "ADD", "rule_id": 2})
+
+    with patch("src.infra.repository.get_session", return_value=mock_get_session_cm):
+        await repo._handle_update(raw_data)
+
+    assert len(repo._rules) == 1
+    assert repo._rules[0].id == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_lifecycle(repo):
+    # Mock listener and loop to avoid blocking/infinite loops
+    # We replace the methods on the instance with AsyncMocks
+    repo._redis_listener = AsyncMock()
+    repo._periodic_sync_loop = AsyncMock()
+
+    repo.start_sync()
+    assert repo._sync_task is not None
+    assert repo._periodic_sync_task is not None
+
+    # Check that calling start_sync again doesn't spawn new tasks if not done
+    t1 = repo._sync_task
+    repo.start_sync()
+    assert repo._sync_task is t1
+
+    await repo.stop_sync()

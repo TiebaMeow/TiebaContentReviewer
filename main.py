@@ -8,6 +8,11 @@ from tiebameow.utils.logger import init_logger, logger
 
 from src.config import settings
 from src.core.engine import RuleMatcher
+from src.core.provider import (
+    FunctionProvider,
+    HybridFunctionProvider,
+    LocalFunctionProvider,
+)
 from src.infra.db import dispose_db, init_db
 from src.infra.dispatcher import ReviewResultDispatcher
 from src.infra.redis_client import get_redis_client
@@ -38,7 +43,18 @@ async def main() -> None:
     redis_client = await get_redis_client()
     repo = RuleRepository(redis_client)
     dispatcher = ReviewResultDispatcher(redis_client)
-    matcher = RuleMatcher()
+
+    # 根据配置初始化函数提供者
+    provider: FunctionProvider
+    if settings.RPC_ENABLED:
+        target = settings.RPC_URL.replace("http://", "").replace("https://", "")
+        logger.info("Initializing Hybrid Function Provider (RPC Target: {})", target)
+        provider = HybridFunctionProvider(rpc_target=target, rpc_timeout=settings.RPC_TIMEOUT)
+    else:
+        logger.info("Initializing Local Function Provider")
+        provider = LocalFunctionProvider()
+
+    matcher = RuleMatcher(provider=provider)
 
     # 3. 加载规则并启动同步
     try:

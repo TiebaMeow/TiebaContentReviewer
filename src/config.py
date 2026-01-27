@@ -65,12 +65,18 @@ class Settings(BaseSettings):
     ENABLE_STREAM_RECOVERY: bool = False
     STREAM_RECOVERY_INTERVAL: int = 60  # seconds
     STREAM_MIN_IDLE_TIME: int = 60000  # milliseconds (1 minute)
+    WORKER_CONCURRENCY: int = 50
 
     # Rule Sync Settings
     RULE_SYNC_INTERVAL: int = 300  # seconds (5 minutes)
 
     # Logging
     LOG_LEVEL: str = "INFO"
+
+    # Function Call RPC
+    RPC_ENABLED: bool = False
+    RPC_URL: str = "http://localhost:8000"
+    RPC_TIMEOUT: float = 5.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

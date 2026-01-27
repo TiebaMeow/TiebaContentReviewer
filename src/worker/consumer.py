@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from redis.exceptions import ResponseError
 from tiebameow.serializer import deserialize
 from tiebameow.utils.logger import logger
@@ -57,29 +57,44 @@ class ReviewWorker:
 
         logger.info("Worker started. Listening on {}", self._stream_key)
 
+        active_tasks: set[asyncio.Task[None]] = set()
+
         while self._running:
             try:
+                # 清理已完成的任务
+                done_tasks = {t for t in active_tasks if t.done()}
+                for task in done_tasks:
+                    try:
+                        task.result()
+                    except Exception as e:
+                        logger.error("Task failed: {}", e)
+                    active_tasks.discard(task)
+
+                # 计算可用配额
+                quota = settings.WORKER_CONCURRENCY - len(active_tasks)
+
+                if quota <= 0:
+                    await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                    continue
+
                 # XREADGROUP
-                # count=BATCH_SIZE, block=2000ms
+                # count=quota, block=1000ms
                 streams = {self._stream_key: ">"}
                 messages = await self._redis.xreadgroup(
                     settings.REDIS_CONSUMER_GROUP,
                     settings.REDIS_CONSUMER_NAME,
                     streams,  # type: ignore
-                    count=settings.BATCH_SIZE,
-                    block=2000,
+                    count=quota,
+                    block=1000,
                 )
 
                 if not messages:
                     continue
 
-                tasks = []
                 for _stream_name, entries in messages:
                     for message_id, fields in entries:
-                        tasks.append(self._process_message(message_id, fields))
-
-                if tasks:
-                    await asyncio.gather(*tasks)
+                        task = asyncio.create_task(self._process_message(message_id, fields))
+                        active_tasks.add(task)
 
             except Exception as e:
                 logger.error("Error in worker loop: {}", e)
@@ -129,7 +144,7 @@ class ReviewWorker:
                 await self._ack(message_id)
                 return
 
-            data = json.loads(raw_data)
+            data = orjson.loads(raw_data)
             object_type = data.get("object_type")
             object_id = data.get("object_id")
             payload = data.get("payload")
@@ -156,9 +171,7 @@ class ReviewWorker:
             rules = self._repo.get_match_rules(self._fid, object_type)
 
             try:
-                # 性能优化: 将 CPU 密集的规则匹配放入线程池执行
-                loop = asyncio.get_running_loop()
-                matched_rules = await loop.run_in_executor(None, self._matcher.match_all, obj, rules)
+                matched_rules = await self._matcher.match_all(obj, rules)
                 if matched_rules:
                     for rule in matched_rules:
                         logger.info("Rule matched: {} (ID: {})", rule.name, rule.id)

@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package review;
+
+/// ReviewFunctionService provides RPC methods for executing review functions.
+service ReviewFunctionService {
+  /// Executes a review function with the provided function name, data, and arguments.
+  /// Returns the success status, result, and any error message.
+    rpc Execute (ExecuteRequest) returns (ExecuteResponse) {}
+}
+
+message ExecuteRequest {
+  string function_name = 1;
+  string data_json = 2; // TiebaDTO serialized as JSON
+  string args_json = 3; // positional args serialized as JSON
+  string kwargs_json = 4; // keyword args serialized as JSON
+}
+
+message ExecuteResponse {
+  bool success = 1;
+  string result_json = 2; // function result serialized as JSON
+  string error_message = 3;
+}
