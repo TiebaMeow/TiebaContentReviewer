@@ -171,7 +171,7 @@ class ReviewWorker:
             rules = self._repo.get_match_rules(self._fid, object_type)
 
             try:
-                matched_rules = await self._matcher.match_all(obj, rules)
+                matched_rules, context = await self._matcher.match_all(obj, rules)
                 if matched_rules:
                     for rule in matched_rules:
                         logger.info("Rule matched: {} (ID: {})", rule.name, rule.id)
@@ -183,7 +183,7 @@ class ReviewWorker:
             # 分发结果
             obj_dict = obj.model_dump()
             if matched_rules:
-                await self._dispatcher.dispatch(matched_rules, self._fid, object_type, obj_dict)
+                await self._dispatcher.dispatch(matched_rules, self._fid, object_type, obj_dict, context)
 
             # ACK
             await self._ack(message_id)

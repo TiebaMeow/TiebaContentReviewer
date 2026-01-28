@@ -18,6 +18,7 @@ class ReviewResultPayload(BaseModel):
     matched_rule_ids: list[int]
     object_type: str
     object_data: dict[str, Any]
+    function_call_results: dict[str, Any] = Field(default_factory=dict)
     timestamp: float = Field(default_factory=time.time)
 
 
@@ -36,6 +37,7 @@ class ReviewResultDispatcher:
         fid: int,
         object_type: str,
         object_data: dict[str, Any],
+        function_call_results: dict[str, Any] | None = None,
     ) -> None:
         """分发审查结果到 Redis Stream。
 
@@ -57,6 +59,7 @@ class ReviewResultDispatcher:
                 matched_rule_ids=matched_rule_ids,
                 object_type=object_type,
                 object_data=object_data,
+                function_call_results=function_call_results or {},
             )
 
             stream_entry = {"data": payload.model_dump_json()}

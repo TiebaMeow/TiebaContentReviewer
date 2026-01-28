@@ -23,7 +23,7 @@ def mock_dispatcher():
 @pytest.fixture
 def mock_matcher():
     matcher = MagicMock()
-    matcher.match_all.return_value = []
+    matcher.match_all.return_value = ([], {})
     # match_all is run in executor, so it's a sync function mock
     return matcher
 
@@ -105,7 +105,7 @@ async def test_process_message_optimizations(worker, mock_repo, mock_matcher):
 @pytest.mark.asyncio
 async def test_process_message_errors(worker):
     worker._ack = AsyncMock()
-    worker._matcher.match_all = AsyncMock(return_value=[])
+    worker._matcher.match_all = AsyncMock(return_value=([], {}))
 
     # 1. Missing data
     await worker._process_message("1", {})
@@ -201,7 +201,7 @@ async def test_process_message_match_success(worker):
     worker._ack = AsyncMock()
     rule = MagicMock()
     rule.id = 1
-    worker._matcher.match_all = AsyncMock(return_value=[rule])
+    worker._matcher.match_all = AsyncMock(return_value=([rule], {}))
     worker._repo.get_match_rules.return_value = [rule]
     worker._dispatcher.dispatch = AsyncMock()
 

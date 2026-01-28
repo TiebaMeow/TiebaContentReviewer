@@ -27,7 +27,7 @@ class RuleMatcher:
         self,
         data: ThreadDTO | PostDTO | CommentDTO,
         rules: list[ReviewRule],
-    ) -> list[ReviewRule]:
+    ) -> tuple[list[ReviewRule], dict[str, Any]]:
         """批量匹配规则。
 
         按顺序执行规则。
@@ -37,37 +37,50 @@ class RuleMatcher:
             rules: 规则列表。
 
         Returns:
-            list[ReviewRule]: 命中的规则列表。
+            tuple[list[ReviewRule], dict[str, Any]]: 命中的规则列表和函数调用上下文。
         """
         matched: list[ReviewRule] = []
+        context: dict[str, Any] = {}
 
         for rule in rules:
-            if await self.match(data, rule):
+            if await self.match(data, rule, context):
                 matched.append(rule)
                 if rule.block:
                     break
-        return matched
+        return matched, context
 
-    async def match(self, data: ThreadDTO | PostDTO | CommentDTO, rule: ReviewRule) -> bool:
+    async def match(
+        self,
+        data: ThreadDTO | PostDTO | CommentDTO,
+        rule: ReviewRule,
+        context: dict[str, Any] | None = None,
+    ) -> bool:
         """判断数据是否命中规则。
 
         Args:
             data: 待审查的数据字典。
             rule: 审查规则实体。
+            context: 函数调用上下文字典。
 
         Returns:
             bool: 如果数据命中规则返回 True，否则返回 False。
         """
         if not rule.enabled:
             return False
-        return await self._evaluate_node(data, rule.trigger)
+        return await self._evaluate_node(data, rule.trigger, context)
 
-    async def _evaluate_node(self, data: ThreadDTO | PostDTO | CommentDTO, node: RuleNode) -> bool:
+    async def _evaluate_node(
+        self,
+        data: ThreadDTO | PostDTO | CommentDTO,
+        node: RuleNode,
+        context: dict[str, Any] | None = None,
+    ) -> bool:
         """递归评估规则节点。
 
         Args:
             data: 待审查的数据。
             node: 当前评估的规则节点（条件或规则组）。
+            context: 函数调用上下文字典。
 
         Returns:
             bool: 节点评估结果。
@@ -78,28 +91,33 @@ class RuleMatcher:
 
             if node.logic == LogicType.AND:
                 for child in node.conditions:
-                    if not await self._evaluate_node(data, child):
+                    if not await self._evaluate_node(data, child, context):
                         return False
                 return True
             elif node.logic == LogicType.OR:
                 for child in node.conditions:
-                    if await self._evaluate_node(data, child):
+                    if await self._evaluate_node(data, child, context):
                         return True
                 return False
             elif node.logic == LogicType.NOT:
                 # NOT 逻辑只应用于第一个子条件
-                return not await self._evaluate_node(data, node.conditions[0])
+                return not await self._evaluate_node(data, node.conditions[0], context)
 
             return False  # type: ignore[unreachable]
 
         else:
-            return await self._evaluate_condition(data, node)
+            return await self._evaluate_condition(data, node, context)
 
-    async def _evaluate_condition(self, data: ThreadDTO | PostDTO | CommentDTO, condition: Condition) -> bool:
+    async def _evaluate_condition(
+        self,
+        data: ThreadDTO | PostDTO | CommentDTO,
+        condition: Condition,
+        context: dict[str, Any] | None = None,
+    ) -> bool:
         # 支持嵌套字段访问，例如 'author.level'
         # 或者 FunctionCall 计算字段值
         if isinstance(condition.field, FunctionCall):
-            field_value = await self._execute_function_call(data, condition.field)
+            field_value = await self._execute_function_call(data, condition.field, context)
         else:
             field_value = self._get_field_value(data, condition.field)
 
@@ -173,9 +191,17 @@ class RuleMatcher:
             case _:
                 return False  # type: ignore[unreachable]
 
-    async def _execute_function_call(self, data: ThreadDTO | PostDTO | CommentDTO, func_call: FunctionCall) -> Any:
+    async def _execute_function_call(
+        self,
+        data: ThreadDTO | PostDTO | CommentDTO,
+        func_call: FunctionCall,
+        context: dict[str, Any] | None = None,
+    ) -> Any:
         """执行 FunctionCall 获取值。"""
-        return await self._provider.execute(func_call.name, data, func_call.args, func_call.kwargs)
+        result = await self._provider.execute(func_call.name, data, func_call.args, func_call.kwargs)
+        if context is not None:
+            context[func_call.name] = result
+        return result
 
     def _get_compiled_regex(self, pattern: str) -> re.Pattern[str]:
         """获取编译后的正则表达式对象（带缓存）。"""

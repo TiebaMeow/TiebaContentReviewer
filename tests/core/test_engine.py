@@ -82,7 +82,7 @@ async def test_match_all(matcher, mock_rule):
     rule2 = mock_rule(id=2, name="Rule 2", val="bar", block=True)
 
     data = ThreadDTO.from_incomplete_data({"title": "foo"})
-    matched = await matcher.match_all(data, [rule1, rule2])
+    matched, _ = await matcher.match_all(data, [rule1, rule2])
 
     assert len(matched) == 1
     assert matched[0].id == 1
@@ -206,12 +206,12 @@ async def test_match_all_mixed(matcher, mock_rule):
     data = ThreadDTO.from_incomplete_data({})
 
     # Patch match to simulate rule passing without actual function execution
-    async def side_effect_match(d, r):
+    async def side_effect_match(d, r, ctx=None):
         # We want both to match
         return True
 
     with patch.object(matcher, "match", side_effect=side_effect_match):
-        matched = await matcher.match_all(data, [r1, r2])
+        matched, _ = await matcher.match_all(data, [r1, r2])
 
     assert len(matched) == 2
     ids = {r.id for r in matched}
@@ -235,7 +235,7 @@ async def test_match_all_blocking_priority(matcher, mock_rule):
 
     with patch.object(matcher, "match", return_value=True) as mock_match:
         # Pass in sorted order (fast_block first)
-        matched = await matcher.match_all(data, [fast_block, slow])
+        matched, _ = await matcher.match_all(data, [fast_block, slow])
 
         assert len(matched) == 1
         assert matched[0].id == 1
